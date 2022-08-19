@@ -1,0 +1,204 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "registryName": {
+            "type": "string",
+            "metadata": {
+                "description": "The name of the container registry"
+            }
+        },
+        "zoneRedundancy": {
+            "type": "string",
+            "defaultValue": "disabled",
+            "allowedValues": [
+                "enabled",
+                "disabled"
+            ]
+        },
+        "tags": {
+            "type": "object",
+            "defaultValue": {},
+            "metadata": {
+                "description": "Tags to be assigned to the container registry. Format as JSON object, e.g.: {\"key1\":\"value1\",\"key2\":\"value2\"}"
+            }
+        },
+        "location": {
+            "type": "string",
+            "allowedValues": [
+                "westus2",
+                "eastus2"
+            ],
+            "defaultValue": "[resourceGroup().location]"
+        },
+        "privateEndpointName": {
+            "type": "string",
+            "metadata": {
+                "description": "The name of the private endpoint"
+            },
+            "defaultValue": "[concat('pe-', parameters('registryName'))]"
+        },
+        "vNetName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the Virtual Network"
+            }
+        },
+        "subnetName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the Subnet"
+            }
+        },
+        "adminUserEnabled": {
+            "type": "bool",
+            "defaultValue": false
+        },
+        "anonymousPullEnabled": {
+            "type": "bool",
+            "defaultValue": false
+        }
+    },
+    "variables": {
+        "deploymentUid": "[uniqueString(resourceGroup().id, deployment().name)]",
+        "virtualNetworkResourceId": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vNetName'))]",
+        "subnetResourceId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vNetName'), parameters('subnetName'))]",
+        "privateEndpointNic": "[concat(parameters('privateEndpointName'), '-nic')]",
+        "privateDnsDeployment": "[concat('PrivateDnsZone-', variables('deploymentUid'))]",
+        "virtualNetworkLinkDeployment": "[concat('VirtualNetworkLink-', variables('deploymentUid'))]"
+    },
+    "resources": [
+        {
+            "name": "[parameters('registryName')]",
+            "type": "Microsoft.ContainerRegistry/registries",
+            "location": "[parameters('location')]",
+            "apiVersion": "2021-12-01-preview",
+            "sku": {
+                "name": "Premium"
+            },
+            "dependsOn": [],
+            "tags": "[parameters('tags')]",
+            "properties": {
+                "adminUserEnabled": "[parameters('adminUserEnabled')]",
+                "anonymousPullEnabled": "[parameters('anonymousPullEnabled')]",
+                "publicNetworkAccess": "Disabled",
+                "zoneRedundancy": "[parameters('zoneRedundancy')]"
+            }
+        },
+        {
+            "type": "Microsoft.Network/privateEndpoints",
+            "apiVersion": "2021-05-01",
+            "name": "[parameters('privateEndpointName')]",
+            "location": "[parameters('location')]",
+            "properties": {
+                "subnet": {
+                    "id": "[variables('subnetResourceId')]"
+                },
+                "customNetworkInterfaceName": "[variables('privateEndpointNic')]",
+                "privateLinkServiceConnections": [
+                    {
+                        "name": "[parameters('privateEndpointName')]",
+                        "properties": {
+                            "privateLinkServiceId": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName'))]",
+                            "groupIds": [ "registry" ]
+                        }
+                    }
+                ]
+            },
+            "tags": {},
+            "dependsOn": [
+                "[resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName'))]"
+            ]
+        },
+        {
+            "apiVersion": "2017-05-10",
+            "name": "[variables('privateDnsDeployment')]",
+            "type": "Microsoft.Resources/deployments",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', parameters('privateEndpointName'))]"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "resources": [
+                        {
+                            "type": "Microsoft.Network/privateDnsZones",
+                            "apiVersion": "2018-09-01",
+                            "name": "privatelink.azurecr.io",
+                            "location": "global",
+                            "tags": {},
+                            "properties": {}
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "apiVersion": "2017-05-10",
+            "name": "[variables('virtualNetworkLinkDeployment')]",
+            "type": "Microsoft.Resources/deployments",
+            "dependsOn": [
+                "[variables('privateDnsDeployment')]"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "resources": [
+                        {
+                            "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+                            "apiVersion": "2018-09-01",
+                            "name": "[concat('privatelink.azurecr.io', '/', uniqueString(variables('virtualNetworkResourceId')))]",
+                            "location": "global",
+                            "properties": {
+                                "virtualNetwork": {
+                                    "id": "[variables('virtualNetworkResourceId')]"
+                                },
+                                "registrationEnabled": false
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "apiVersion": "2017-05-10",
+            "name": "[concat('DnsZoneGroup-', variables('deploymentUid'))]",
+            "type": "Microsoft.Resources/deployments",
+            "resourceGroup": "[resourceGroup().name]",
+            "dependsOn": [
+                "[parameters('privateEndpointName')]",
+                "[variables('privateDnsDeployment')]",
+                "[variables('virtualNetworkLinkDeployment')]"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "resources": [
+                        {
+                            "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+                            "apiVersion": "2020-11-01",
+                            "name": "[concat(parameters('privateEndpointName'), '/', 'default')]",
+                            "location": "[parameters('location')]",
+                            "properties": {
+                                "privateDnsZoneConfigs": [
+                                    {
+                                        "name": "privatelink-azurecr-io",
+                                        "properties": {
+                                            "privateDnsZoneId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.Network/privateDnsZones', 'privatelink.azurecr.io')]"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}
